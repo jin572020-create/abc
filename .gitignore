@@ -1,0 +1,7 @@
+/build/
+/compiler
+*.o
+*.so
+*.a
+.vscode/
+.idea/
