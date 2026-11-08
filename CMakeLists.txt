@@ -5,6 +5,3 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 add_executable(compiler src/main.cpp)
 target_compile_options(compiler PRIVATE -Wall -Wextra -Wpedantic)
-set_target_properties(compiler PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}"
-)
