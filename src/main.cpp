@@ -2,10 +2,12 @@
 #include <array>
 #include <cctype>
 #include <iostream>
+#include <iterator>
 #include <map>
 #include <queue>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -219,14 +221,24 @@ int main(int argc,char** argv){
     string src((istreambuf_iterator<char>(cin)),istreambuf_iterator<char>());
     src=normalized(move(src));
     Lexer lexer(automaton,src);auto tokens=lexer.scan();
-    for(size_t i=0;i<tokens.size();++i){
-        const auto& t=tokens[i];cout<<i<<':'<<t.kind<<':';
+    size_t emitted = 0;
+    int outputErrors = 0;
+    for(const auto& t : tokens){
         if(t.kind=="IntConst") {
-            // Integers are lexical digit strings; range validation is diagnostic only.
-            try {size_t parsed=0;stoll(t.lexeme,&parsed,10);cout<<t.lexeme;}
-            catch(const out_of_range&){cerr<<t.line<<':'<<t.column<<": integer out of signed 64-bit range\n";}
-        } else cout<<'"'<<t.lexeme<<'"';
+            try {
+                size_t parsed = 0;
+                stoll(t.lexeme, &parsed, 10);
+                if(parsed != t.lexeme.size()) throw invalid_argument("partial integer");
+            } catch(const exception&) {
+                cerr<<t.line<<':'<<t.column<<": invalid integer constant\n";
+                ++outputErrors;
+                continue;
+            }
+        }
+        cout<<emitted++<<':'<<t.kind<<':';
+        if(t.kind=="IntConst") cout<<t.lexeme;
+        else cout<<'"'<<t.lexeme<<'"';
         cout<<'\n';
     }
-    return lexer.errorCount()?1:0;
+    return (lexer.errorCount() || outputErrors) ? 1 : 0;
 }
