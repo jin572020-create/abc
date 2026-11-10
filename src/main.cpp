@@ -70,7 +70,7 @@ struct Automaton {
         auto alpha=letters(), alnum=alpha, dg=digits();
         alnum.insert(dg.begin(),dg.end());
         add("Ident",concat(charset(alpha),star(charset(alnum))));
-        add("IntConst",alternate(literal("0"),concat(charset(digits(true)),star(charset(dg)))));
+        add("IntConst",concat(charset(dg),star(charset(dg))));
         for(const char* op : {"==","!=","<=",">=","&&","||","+","-","*","/","%","=","<",">","!","(",")","{","}",";",","})
             add("'"+string(op)+"'",literal(op));
         determinize(); minimize();
@@ -151,10 +151,32 @@ class Lexer {
     const Automaton& a;
     const string& s;
     size_t pos=0;
-    int line=1,column=1, errors=0;
+    int line=0,column=0;
+    vector<string> errors;
+
     void advance() {
-        if(s[pos]=='\n'){++line;column=1;}else ++column;
+        if(s[pos]=='\n'){++line;column=0;}else ++column;
         ++pos;
+    }
+    // Consume one complete UTF-8 scalar value, not one byte.
+    string consumeCharacter() {
+        size_t first=pos;
+        unsigned char lead=(unsigned char)s[pos];
+        int count=1;
+        if(lead>=0xC2 && lead<=0xDF)count=2;
+        else if(lead>=0xE0 && lead<=0xEF)count=3;
+        else if(lead>=0xF0 && lead<=0xF4)count=4;
+        for(int i=1;i<count;++i){
+            if(pos+(size_t)i>=s.size() || ((unsigned char)s[pos+i]&0xC0)!=0x80){count=1;break;}
+        }
+        pos+=count;
+        ++column;
+        return s.substr(first,count);
+    }
+    void errorCharacter(const string& ch,int atLine) {
+        string delimiter=ch=="'" ? "\"" : "'";
+        string shown=(ch=="\\") ? "\\\\" : ch;
+        errors.push_back(to_string(atLine)+" illegal character "+delimiter+shown+delimiter);
     }
     void skip() {
         for(;;) {
@@ -165,14 +187,14 @@ class Lexer {
                 continue;
             }
             if(pos+1<s.size()&&s[pos]=='/'&&s[pos+1]=='*') {
-                int l=line,c=column;advance();advance();bool closed=false;
+                int l=line;advance();advance();bool closed=false;
                 while(pos<s.size()) {
                     if(pos+1<s.size()&&s[pos]=='*'&&s[pos+1]=='/'){
                         advance();advance();closed=true;break;
                     }
                     advance();
                 }
-                if(!closed){cerr<<l<<':'<<c<<": unterminated comment\n";++errors;}
+                if(!closed)errors.push_back(to_string(l)+" unterminated comment");
                 continue;
             }
             return;
@@ -196,15 +218,14 @@ public:
                 tokens.push_back({a.rules[bestRule].kind,s.substr(start,pos-start),l,c});
             }else{
                 pos=start;line=l;column=c;
-                cerr<<line<<':'<<column<<": unexpected character ";
-                if((unsigned char)s[pos]>=32&&(unsigned char)s[pos]<127)cerr<<"'"<<s[pos]<<"'";
-                else cerr<<"(byte "<<int((unsigned char)s[pos])<<")";
-                cerr<<'\n';++errors;advance();
+                auto ch=consumeCharacter();
+                errorCharacter(ch,l);
             }
         }
         return tokens;
     }
-    int errorCount()const{return errors;}
+    const vector<string>& diagnostics()const{return errors;}
+    int errorCount()const{return (int)errors.size();}
 };
 string normalized(string s) {
     string t;t.reserve(s.size());
@@ -221,24 +242,14 @@ int main(int argc,char** argv){
     string src((istreambuf_iterator<char>(cin)),istreambuf_iterator<char>());
     src=normalized(move(src));
     Lexer lexer(automaton,src);auto tokens=lexer.scan();
-    size_t emitted = 0;
-    int outputErrors = 0;
-    for(const auto& t : tokens){
-        if(t.kind=="IntConst") {
-            try {
-                size_t parsed = 0;
-                stoll(t.lexeme, &parsed, 10);
-                if(parsed != t.lexeme.size()) throw invalid_argument("partial integer");
-            } catch(const exception&) {
-                cerr<<t.line<<':'<<t.column<<": invalid integer constant\n";
-                ++outputErrors;
-                continue;
-            }
-        }
-        cout<<emitted++<<':'<<t.kind<<':';
-        if(t.kind=="IntConst") cout<<t.lexeme;
-        else cout<<'"'<<t.lexeme<<'"';
+    if(lexer.errorCount()) {
+        cout<<"reject\n";
+        for(const auto& error : lexer.diagnostics())cout<<error<<'\n';
         cout<<'\n';
     }
-    return (lexer.errorCount() || outputErrors) ? 1 : 0;
+    for(size_t i=0;i<tokens.size();++i){
+        const auto& t=tokens[i];
+        cout<<i<<':'<<t.kind<<":\""<<t.lexeme<<"\"\n";
+    }
+    return lexer.errorCount()?1:0;
 }
