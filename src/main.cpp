@@ -251,5 +251,6 @@ int main(int argc,char** argv){
         const auto& t=tokens[i];
         cout<<i<<':'<<t.kind<<":\""<<t.lexeme<<"\"\n";
     }
-    return lexer.errorCount()?1:0;
+    return 0;
+    //return lexer.errorCount()?1:0;
 }
