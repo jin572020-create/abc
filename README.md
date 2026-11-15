@@ -58,3 +58,7 @@ python3 tests/run_syntax.py --compiler ./compiler
 ## 阶段范围
 
 本次交付完成 `-token`、`-ast` 与基础语义检查，不包含第三、第四阶段的 `-ir`、`-asm`、RV64GC 代码生成，也不宣称覆盖全部未公开隐藏用例。
+
+
+## Submission note
+The tests/ folder is optional and omitted from the minimal submission. Run `make test` for a syntax smoke test.

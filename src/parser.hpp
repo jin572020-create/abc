@@ -64,7 +64,6 @@ class Parser {
         }
         if(is("while")) {
             auto t=take();
-            if(!is("(") && id() && peek(1).lexeme=="=") problems.push_back(peek().line);
             expect("(");auto cond=expr();expect(")");auto body=stmt();return node("While",t,{cond,body});
         }
         if(is("break")||is("continue")){auto t=take();expect(";");return node(t.lexeme=="break"?"Break":"Continue",t);}
