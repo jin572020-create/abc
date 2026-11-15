@@ -1,43 +1,60 @@
-# ToyC Lexer — Stage 1
+# ToyC 编译器 · 第一阶段词法 + 第二阶段语法与语义
 
-第一阶段 ToyC 词法分析器。标准输入读取源代码，`-token` 时按测试样例要求在标准输出打印 Token。源码为 `src/main.cpp`，实现了 Thompson 风格的 NFA 片段、子集构造 DFA 和保持 Token 标签的 DFA 最小化。
+本项目继续在原仓库内实现，不需要新建仓库。使用 C++17，无 Flex/Bison/ANTLR 依赖。
 
-## 编译与运行
+## 构建
 
-Linux / WSL，根目录运行：
+在 Linux/Ubuntu 的仓库根目录运行：
 
 ```bash
-make
-./compiler -token < tests/lexical/l01_keywords.c
+make clean && make
+# 或：
+cmake -S . -B build && cmake --build build
+```
+
+- `make` 输出 `./compiler`；
+- `cmake` 默认输出 `./build/compiler`。不要提交任何 `compiler` 二进制文件或 `build/`。
+- 提交平台要求的可执行路径以平台实际配置为准；本项目没有改变原仓库的 CMake 和 Make 输出目录约定。
+
+## 使用
+
+```bash
+./compiler -token < input.c > input.token
+./compiler -ast < input.c > input.check-ast
+```
+
+`-token`：保留第一阶段 Token 输出格式。出现词法非法字符时输出 `reject`、诊断和合法 Token。
+
+`-ast`：从 stdin 读取 ToyC 源程序，完成词法、递归下降语法分析和已实现的基础语义检查。
+成功输出 `accept`；失败输出 `reject`，后面按升序列出错误的 **0 基**行号，允许重复行号。错误文本为可选，本项目不输出。
+两种接口的正常执行均返回码 `0`，stderr 不写测试数据。
+
+## 实现方式
+
+- `src/main.cpp`：第一阶段 Thompson 风格 NFA→DFA→DFA 最小化词法器和统一驱动。
+- `src/parser.hpp`：第二阶段递归下降解析器，构建内部 AST（Program、Function、Block、Decl、Assign、Binary、Unary、Call、Return 等），保留源码位置。
+- `src/semantic.hpp`：语义检查，包括局部词法作用域、变量未声明与重复声明、形参数量、void 值被使用、循环外 break/continue。
+- 表达式使用按优先级分层的循环解析（等价于消除左递归后的尾部产生式），保证乘除高于加减、同级运算符左结合；if/else 遵循最近 if 原则。
+- 在语句错误处通过 `;`、`}` 或控制关键字同步，避免死循环和部分级联诊断。
+
+### 左递归的等价改写
+
+原文法 `AddExpr -> AddExpr (+|-) MulExpr | MulExpr`，等价于
+`AddExpr -> MulExpr AddExprTail`、
+`AddExprTail -> (+|-) MulExpr AddExprTail | ε`。
+乘除、关系、逻辑与/或层同理。实现以循环从左向右构造 `Binary` 节点，保持左结合。
+
+## 回归测试
+
+```bash
 make test
+# 或
+python3 tests/run_tests.py --compiler ./compiler
+python3 tests/run_syntax.py --compiler ./compiler
 ```
 
-也支持 CMake，保留原仓库的默认产物路径（不擅自改动）：
+测试样例来源于课程所提供的 `cases20261110.zip`。词法 30 例、语法与语义 25 例。比较前仅统一测试答案文件的 CRLF/LF 换行，解析结果按要求比较首行与行号。
 
-```bash
-cmake -S . -B build
-cmake --build build
-./build/compiler -token < tests/lexical/l01_keywords.c
-python3 tests/run_tests.py --compiler ./build/compiler
-```
+## 阶段范围
 
-> `compiler` 是构建出的二进制文件，**不要提交**。请使用评测平台要求的构建方案和入口。Makefile 默认在根目录产生 `./compiler`，CMake 默认在 `build/` 下产生 `compiler`。本次未擅自修改上述路径约定。
-
-## 词法格式（以 `cases20261110.zip` 的 30 组样例为准）
-
-- `序号:类型:"原始词素"`，整数也加引号；例如 `0:IntConst:"000000"`。
-- 连续数字按一个 `IntConst` 匹配，保留前导零，不在词法阶段做数值转换。
-- 运算符采用最长匹配；关键字优先于同长度标识符。
-- 空白、`//`、`/*...*/` 注释不产生 Token。
-- 若有非法字符：输出 `reject`、逐条 `零基行号 illegal character '字符'`，空一行后继续输出合法 Token。单引号使用双引号包围；反斜杠表示为 `\\`；UTF-8 非 ASCII 字符按完整字符报错一次。
-- 错误用例返回非零退出码，合法输入返回 0。
-
-**约定差异**：较早实验指导文字将 `IntConst` 记录为无引号、数字规则写为 `0|[1-9][0-9]*`。2026-11-10 提供的标准 `.token` 文件明确使用带引号的整数，并要求 `000000` 是单个 Token。本版本严格依据该批测试的标准输出。若希冀实际评测采用另一套规范，则需核对评测版本。
-
-## 测试
-
-```bash
-make test
-```
-
-内置 30 组原样词法 `.c` 与 `.token` 对照，测试逐字节比对 stdout（预先规范化参考文件的 CRLF 为 LF），检查成功/失败退出码及 stderr。该测试**不**代表第二、三、四阶段：`-ast`、`-asm` 尚未实现。
+本次交付完成 `-token`、`-ast` 与基础语义检查，不包含第三、第四阶段的 `-ir`、`-asm`、RV64GC 代码生成，也不宣称覆盖全部未公开隐藏用例。
