@@ -1,4 +1,6 @@
 #include <memory>
+#include <cstring>
+#include <cerrno>
 #include <utility>
 #include <unordered_map>
 #include <unordered_set>
@@ -238,17 +240,53 @@ string normalized(string s) {
 }
 #include "parser.hpp"
 #include "semantic.hpp"
+#include "ir.hpp"
 } // namespace
+#include "llvm_driver.hpp"
 int main(int argc,char** argv){
-    if(argc!=2||(string(argv[1])!="-token"&&string(argv[1])!="-dump-dfa"&&string(argv[1])!="-ast")){
-        cerr<<"Usage: compiler -token | -ast | -dump-dfa\n";return 2;
+    std::string mode;
+    bool opt=false;
+    for(int i=1;i<argc;++i){
+        std::string a=argv[i];
+        if(a=="-opt"){if(opt){std::cerr<<"duplicate -opt\n";return 2;}opt=true;}
+        else if(a=="-token"||a=="-dump-dfa"||a=="-ast"||a=="-ir"||a=="-asm"){
+            if(!mode.empty()){std::cerr<<"multiple modes\n";return 2;}
+            mode=a;
+        }else{std::cerr<<"Unknown option: "<<a<<"\n";return 2;}
+    }
+    if(mode.empty()||(opt&&mode!="-asm"&&mode!="-ir")){
+        std::cerr<<"Usage: compiler (-token|-ast|-dump-dfa|-ir|-asm) [-opt]\n";
+        return 2;
     }
     Automaton automaton;automaton.finishRules();
-    if(string(argv[1])=="-dump-dfa"){automaton.dump();return 0;}
+    if(mode=="-dump-dfa"){automaton.dump();return 0;}
     string src((istreambuf_iterator<char>(cin)),istreambuf_iterator<char>());
     src=normalized(move(src));
     Lexer lexer(automaton,src);auto tokens=lexer.scan();
-    if(string(argv[1])=="-ast") {
+    if(mode=="-ir"||mode=="-asm") {
+        if(lexer.errorCount()){
+            std::cerr<<"lexical analysis failed\n";return 1;
+        }
+        int line=0;for(char ch:src)if(ch=='\n')++line;
+        Parser parser(std::move(tokens),line);
+        auto ast=parser.parse();
+        if(!parser.errors().empty()){
+            std::cerr<<"syntax analysis failed at line "<<parser.errors().front()<<"\n";return 1;
+        }
+        Semantic semantic;
+        auto errors=semantic.check(ast);
+        if(!errors.empty()){
+            std::cerr<<"semantic analysis failed at line "<<errors.front()<<"\n";return 1;
+        }
+        try{
+            IREmitter emitter;
+            auto ir=emitter.generate(ast);
+            if(mode=="-ir"&&!opt){std::cout<<ir;return 0;}
+            std::cout<<compileLLVM(ir,mode=="-asm",opt);
+            return 0;
+        }catch(const std::exception &e){std::cerr<<"ToyC code generation: "<<e.what()<<"\n";return 1;}
+    }
+    if(mode=="-ast") {
         std::vector<int> errors;
         if(lexer.errorCount()){
             // Lexical diagnostics are written as their zero-based source line numbers.
