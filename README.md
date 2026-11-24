@@ -1,56 +1,88 @@
-# ToyC 编译器：纯 C++17 自主实现的 LLVM IR 子集与 RV64GC 后端
+# ToyC 编译器：自主实现的优化版 RISC-V64GC 后端
 
-## 依赖与构建
+> 本包用于覆盖原 `abc` 仓库。**编译器的构建和运行仅依赖 C++17**，不执行 Clang/LLVM，也不需要安装 LLVM SDK。`clang`/`gcc` 仅出现在开发验证脚本中，不属于评测运行依赖。
 
-**编译器运行时不依赖 Clang、LLVM、Flex、Bison、系统调用或任何外部编译器。**
+## 1. 构建与评测接口
 
-- 构建：C++17 编译器（g++ 9+ 或兼容实现）、Make 或 CMake 3.12+。
-- `make clean && make` 在仓库根目录生成 `./compiler`。
-- `cmake -S . -B build && cmake --build build` 在 `build/compiler` 生成可执行文件。
-- `python3 tests/selftest.py` 运行无需其他外部程序的自检。
-- 若要运行真正 RISC-V 程序，需按照课程要求另行配置 `riscv64-unknown-elf-gcc`、`qemu-riscv64` 与 `third_party/toyc/libtoyc.a`；它们不是编译器本身的运行依赖。
+在仓库根目录执行：
 
-## 用法
+```sh
+make clean && make
+make test
+# 或者
+cmake -S . -B build
+cmake --build build
+```
+
+`make` 生成根目录的 `./compiler`；CMake 生成 `build/compiler`。评测平台若要求根目录 `./compiler`，请用 `make` 构建。
 
 ```sh
 ./compiler -token < input.c
 ./compiler -ast < input.c
-./compiler -ir < input.c > input.ll             # 调试接口
-./compiler -ir -opt < input.c > optimized.ll   # 调试接口
-./compiler -asm < input.c > input.s            # 评测功能接口
-./compiler -asm -opt < input.c > optimized.s   # 评测性能接口
+./compiler -asm < input.c > input.s
+./compiler -asm -opt < input.c > input.opt.s
+./compiler -ir < input.c > input.ll            # 自主 LLVM IR 文本，调试接口
+./compiler -ir -opt < input.c > input.opt.ll  # 优化后的 IR，调试接口
 ./compiler -dump-dfa
 ```
 
-编译器从 stdin 读 ToyC，向 stdout 输出结果；代码生成失败报告到 stderr 并返回非零退出状态。
+正常代码生成只往 stdout 打印 LLVM IR / RV64GC 汇编文本。错误诊断写 stderr；`-token`、`-ast` 行为保持与原阶段版本兼容。
 
-## 架构
+## 2. 源码架构
 
-- `src/main.cpp`: NFA→DFA→最小化扫描器、CLI、前端串联。
-- `src/parser.hpp`: 递归下降语法分析，构造 AST。
-- `src/semantic.hpp`: 基础语义检查（作用域、参数数量、返回值、循环内 break/continue）。
-- `src/ir.hpp`: **手写** ToyC AST→LLVM IR（文本形式，所用指令是本项目定义的支持子集）。栈上局部变量通过 `alloca/load/store` 表示；if/while、短路求值及 phi 使用基本块表示。
-- `src/optimizer.hpp`: **手写** SSA 常量折叠/传播、简单复制传播、基本块内 CSE、无用纯指令 DCE。优化仅针对项目发出的有限 LLVM IR 指令子集，不是 LLVM 官方优化器。
-- `src/native_backend.hpp`: **手写** LLVM IR 子集解析 + RV64GC 汇编生成。指令选择使用 `addw/subw/mulw/divw/remw` 和控制流跳转；SSA 值以独立栈槽保守分配，处理函数序言/尾声、栈 16 字节对齐、ABI 参数寄存器 `a0..a7`、第九及以后参数、函数调用返回以及 phi 入边并行拷贝。大栈帧和大偏移由扩展指令序列处理。
+| 文件 | 内容 |
+|---|---|
+| `src/main.cpp` | DFA 词法分析、命令行入口、阶段调度 |
+| `src/parser.hpp` | 手写递归下降语法分析与 AST |
+| `src/semantic.hpp` | 作用域、函数参数、返回值、循环语义检查 |
+| `src/ir.hpp` | 手写 AST 到 LLVM IR 子集的转换 |
+| `src/ast_opt.hpp` | 恒假分支清理、有限且无副作用死循环消除、无用局部声明删除 |
+| `src/ast_advanced.hpp` | 纯函数调用外提、受限内联、尾递归消除、循环不变分支外提、归纳乘法强度削减 |
+| `src/ssa_promote.hpp` | 非逃逸、入口已初始化的标量 alloca → SSA；循环汇合处插入 phi |
+| `src/global_cse.hpp` | 基于 CFG 支配关系的跨基本块公共子表达式消除 |
+| `src/optimizer.hpp` | SSA 常量折叠、复制/常量传播、块内 CSE、跨块 CSE、DCE |
+| `src/native_backend.hpp` | 自主解析 IR 子集、寄存器驻留、栈帧、ABI、phi 边并行复制、指令选择与分支融合 |
 
-### 优化边界（必须如实说明）
+## 3. 优化管线
 
-实现了上述基础 IR 优化，**尚未实现**通用 mem2reg（支配树/支配边界）、跨基本块 CSE/GVN、LICM、内联、强度削减魔数法、图着色/线性扫描寄存器分配、两轮窥孔优化和块重排。本版本使用保守的栈槽分配，侧重正确性和不依赖外部 LLVM；在大型性能用例上可能不符合时间要求。`-opt` 是生效的，但不保证显著加速。
+只有 `-opt` 打开时启用以下处理：
 
-## 一致性和限制
+1. 在 AST 上处理可证明安全的恒假分支、死循环与无用局部声明；对无副作用且可保证终止的短函数进行受限内联、循环不变量外提和尾递归转换；对循环不变的重复条件执行有限的 loop unswitch；对单调归纳变量的固定常数乘法进行增量维护。
+2. 从 AST 构造原始、结构合法的 LLVM IR 子集，保留函数、基本块与短路求值。
+3. 对入口已经初始化、地址未逃逸的局部标量进行 SSA 提升；按控制流边生成 phi，折叠简单冗余 phi。
+4. 执行常量折叠/传播、复制传播、基本块内及支配安全的跨基本块 CSE、连锁 DCE。
+5. 自主降低到 RV64GC：对常用 alloca / SSA 值使用独占的 s1–s11 被调用者保存寄存器，其余值仍有栈槽；处理 caller/callee 保存约定及多于八个参数；按前驱边实现 phi 并行复制；融合常见比较/条件跳转；对正的 2 的幂常量乘法/有符号取余做等价替换。
 
-- 仅支持本课程 ToyC 前端生成的 LLVM IR 子集，**不接受任意 LLVM IR**；`-ir` 输出的文本格式遵循该子集对应的 LLVM IR 语法。
-- ToyC 的 `int` 按 32 位有符号整数处理，RV64 输出遵循 LP64D 的 `int` 返回与参数习惯。
-- 外部 `getint`、`putint`、`getch`、`putch` 等运行时函数由课程 `libtoyc.a` 提供，不包含在这个覆盖包中。
-- 不声明所有隐藏测试通过；先前的 `-ast` s05 对旧测试标准存在重复行号差异，具体参见历史记录。
+**重要限制：** 这是针对课程生成的 **LLVM IR 子集** 的自主实现，不是 LLVM 官方优化器，不支持任意 LLVM IR。SSA 提升与寄存器分配采用保守子集策略，并非完整通用 mem2reg 支配边界算法、图着色或线性扫描分配器。未实现通用 LICM、任意函数内联、常量除法魔数法、通用别名分析和两阶段完整窥孔优化。性能提升与 GCC -O2 的比值必须以平台实际运行结果为准。
 
-## 真正执行 RV64GC 示例
+## 4. 自检与测试证据
+
+不依赖外部测试资源的基础测试：
+
+```sh
+make test
+```
+
+附带的 10 个性能测试源程序在 `tests/perf_cases/`；用于本地验证的两个可选脚本：
+
+```sh
+python3 tests/performance_rv64_vm_check.py   # 需要 GCC；使用独立 RV64 子集 VM
+python3 tests/performance_differential.py   # 需要 GCC 与 Clang（只作验证）
+```
+
+上述两个脚本自动将 p04 和 p05 中的千万级/百万级固定内循环缩减到 100 次，或使用其它合法的小规模输入，以便在本地执行差分。它们**不替代希冀平台上的大规模性能测试**。完整验证记录见 `TEST_RESULTS.md`。
+
+如果另有最初的 `cases20261110.zip`，可将其中 `codegen/functional/`、`codegen/performance/` 放到 `fixtures/codegen/`，再执行 `python3 tests/regression_extended.py` 复查 20 个功能用例。
+
+## 5. 正式 RV64 链接与运行
+
+本机开发验证可用 Clang 以 RISC-V 目标检查汇编格式；**交付编译器不调用它**。正式评测请使用课程的工具链及运行库：
 
 ```sh
 ./compiler -asm -opt < input.c > input.opt.s
 riscv64-unknown-elf-gcc -march=rv64gc -mabi=lp64d -nostdlib -static \
   input.opt.s third_party/toyc/libtoyc.a -o input
-qemu-riscv64 ./input < input.in > input.out
+qemu-riscv64 ./input < input.in > output.txt
 ```
 
-如果评测环境约定 `./compiler` 路径，请使用 `make` 构建并保证根目录可执行文件在该路径。
+原仓库已有 `tests/lexical` 可以保留；不需要将大量 `.in/.out/.exit` 文件全部上传。不要提交 `compiler`、`build/` 等编译产物。

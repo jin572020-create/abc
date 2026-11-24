@@ -1,6 +1,8 @@
 #pragma once
 // Standalone subset-LLVM-IR optimizer. SSA constant/copy propagation, local CSE, DCE.
 // Side-effecting instructions (store/call/branch/ret) never removed.
+#include "ssa_promote.hpp"
+#include "global_cse.hpp"
 #include <sstream>
 #include <regex>
 #include <unordered_map>
@@ -81,6 +83,7 @@ static string optimizeSegment(const string& ir){
   else available[right]=left;
  }
  for(auto &line:lines){auto eq=line.find(" = ");if(eq==string::npos)line=sub(line,replaced);else line=line.substr(0,eq+3)+sub(line.substr(eq+3),replaced);}
+ for(int round=0;round<5;++round){auto before=lines;toyc_global_cse::apply(lines);if(before==lines)break;}
  // Delete unused pure definitions; repeat to delete cascading dead computations.
  std::unordered_set<size_t> dead;
  for(int iteration=0;iteration<10;++iteration){
@@ -104,7 +107,8 @@ static string optimizeSegment(const string& ir){
  return out.str();
 }
 static string optimize(const string&ir){
- std::istringstream in(ir);std::ostringstream out;string line,segment;bool inside=false;
+ string promoted=toyc_ssa::promote(ir);
+ std::istringstream in(promoted);std::ostringstream out;string line,segment;bool inside=false;
  while(std::getline(in,line)){
   if(line.rfind("define ",0)==0)inside=true;
   if(inside){segment+=line+"\n";if(line=="}"){out<<optimizeSegment(segment);segment.clear();inside=false;}}

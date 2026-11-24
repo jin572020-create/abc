@@ -59,6 +59,11 @@ struct Generator{
  string fname;
  unordered_map<string,int> slots;
  unordered_map<string,int64_t> known;
+ unordered_map<string,string> promoted;
+ unordered_set<string> promotedSSA;
+ string lastSSA;
+ vector<string> calleeRegs;
+ int savedRegsBase=0;
  unordered_map<string,vector<std::pair<string,string>>> phi;
  int frame=0,used=0,outgoing=0,savedRA=0,savedS0=0;
  void emit(const string&s){out<<"    "<<s<<"\n";}
@@ -80,11 +85,19 @@ struct Generator{
   else {address(off);emit(op+r+", 0(t5)");}
  }
  int slot(const string&s)const {auto i=slots.find(s);if(i==slots.end())throw std::runtime_error("undefined SSA value: "+s+" in "+fname);return i->second;}
- void put(const string&v,const string&r){if(v.empty())return;storeRaw(r,slot(v));}
+ void put(const string&v,const string&r){
+  if(v.empty())return;
+  if(opt && promotedSSA.count(v))emit("mv "+promoted.at(v)+", "+r);
+  else storeRaw(r,slot(v));
+  if(opt && r!="t4") {emit("mv t4, "+r);lastSSA=v;}
+  else lastSSA.clear();
+ }
  void get(string v,const string&r){
   v=trim(v);if(v.empty())throw std::runtime_error("missing operand");
   if(num(v))emit("li "+r+", "+std::to_string(i32(std::stoll(v))));
   else if(opt&&known.count(v))emit("li "+r+", "+std::to_string(i32(known.at(v))));
+  else if(opt && promotedSSA.count(v))emit("mv "+r+", "+promoted.at(v));
+  else if(opt && v==lastSSA){if(r!="t4")emit("mv "+r+", t4");}
   else loadRaw(r,slot(v));
  }
  string operand(const string&s){auto p=s.find_last_of(' ');return trim(p==string::npos?s:s.substr(p+1));}
@@ -98,6 +111,23 @@ struct Generator{
   for(size_t k=0;k<pairs.size();++k){loadRaw("t0",used+static_cast<int>(k)*8);put(pairs[k].first,"t0");}
  }
  void go(const string&from,const string&dest){branches(from,dest);emit("j "+bb(dest));}
+ void directBranch(const string&b,int index,const string&pred,
+                   const string&a,const string&c,const string&t,const string&f){
+  get(a,"t0");get(c,"t1");
+  string mn,left="t0",right="t1";
+  if(pred=="eq")mn="beq";
+  else if(pred=="ne")mn="bne";
+  else if(pred=="slt")mn="blt";
+  else if(pred=="sge")mn="bge";
+  else if(pred=="sgt"){mn="blt";left="t1";right="t0";}
+  else if(pred=="sle"){mn="bge";left="t1";right="t0";}
+  else throw std::runtime_error("unknown direct branch predicate "+pred);
+  bool trueHasPhi=phi.count(t)&&!phi.at(t).empty();
+  string trampoline=bb(b)+"_cmp_edge_"+std::to_string(index);
+  emit(mn+" "+left+", "+right+", "+(trueHasPhi?trampoline:bb(t)));
+  go(b,f);
+  if(trueHasPhi){label(trampoline);go(b,t);}
+ }
  void inst(const Inst&i,const string&b,int index){
   const string& s=i.raw;const string& op=i.opcode;
   string rhs=i.lhs.empty()?s:s.substr(s.find(" = ")+3);
@@ -105,11 +135,18 @@ struct Generator{
   if(op=="phi")return;
   if(op=="load"){
    string addr=match1(rhs,R"(ptr\s+(%[\w.]+))");if(addr.empty())throw std::runtime_error("invalid load: "+s);
-   loadRaw("t0",slot(addr));put(i.lhs,"t0");return;
+   auto reg=promoted.find(addr);
+   if(reg!=promoted.end())emit("mv t0, "+reg->second);
+   else loadRaw("t0",slot(addr));
+   put(i.lhs,"t0");return;
   }
   if(op=="store"){
    std::smatch m;if(!std::regex_search(rhs,m,std::regex(R"(^store i32\s+([^,]+),\s*ptr\s+(%[\w.]+))")))throw std::runtime_error("invalid store: "+s);
-   get(trim(m[1]),"t0");storeRaw("t0",slot(m[2]));return;
+   get(trim(m[1]),"t0");
+   auto reg=promoted.find(m[2]);
+   if(reg!=promoted.end())emit("mv "+reg->second+", t0");
+   else storeRaw("t0",slot(m[2]));
+   return;
   }
   if(op=="add"||op=="sub"||op=="mul"||op=="sdiv"||op=="srem"){
    auto p=splitArgs(rhs.substr(rhs.find("i32 ")+4));if(p.size()!=2)throw std::runtime_error("binary: "+s);
@@ -126,6 +163,26 @@ struct Generator{
      else if(op=="sdiv")result=i32(av/bv);
      else result=i32(av%bv);
      if(ok){known[i.lhs]=result;return;}
+    }
+   }
+   if(opt && num(c) && (op=="mul" || op=="srem")){
+    int32_t divisor=i32(std::stoll(c));
+    if(divisor>0 && (divisor & (divisor-1))==0){
+     unsigned k=0;while((1ULL<<k)!=static_cast<unsigned>(divisor))++k;
+     get(a,"t0");
+     if(op=="mul")emit("slliw t2, t0, "+std::to_string(k));
+     else if(k==0)emit("li t2, 0");
+     else {
+      // LLVM srem uses a quotient rounded toward zero, including negative dividends.
+      // r = x - ((x + ((x < 0) ? (2^k-1) : 0)) & ~(2^k-1)).
+      emit("sraiw t3, t0, 31");
+      emit("srli t3, t3, "+std::to_string(64-k));
+      emit("addw t3, t0, t3");
+      emit("li t1, -"+std::to_string(divisor));
+      emit("and t3, t3, t1");
+      emit("subw t2, t0, t3");
+     }
+     put(i.lhs,"t2");return;
     }
    }
    get(a,"t0");get(c,"t1");
@@ -157,7 +214,7 @@ struct Generator{
     if(n<8)loadRaw("a"+std::to_string(n),outgoing+static_cast<int>(n)*8,true);
     else {loadRaw("t0",outgoing+static_cast<int>(n)*8,true);storeRaw("t0",static_cast<int>(n-8)*8,true);}
    }
-   emit("call "+fn);
+   emit("call "+fn);lastSSA.clear();
    if(ret=="i32")put(i.lhs,"a0");
    return;
   }
@@ -165,11 +222,14 @@ struct Generator{
    if(starts(rhs,"br label %")){go(b,trim(rhs.substr(10)));return;}
    std::smatch m;if(!std::regex_search(rhs,m,std::regex(R"(^br i1\s+(\S+),\s*label %(\S+),\s*label %(\S+))")))throw std::runtime_error("branch: "+s);
    string pred=m[1],t=m[2],f=m[3];
+   if(opt && num(pred)){go(b,i32(std::stoll(pred))?t:f);return;}
    get(pred,"t0");
+   bool trueHasPhi=phi.count(t)&&!phi.at(t).empty();
    string tramp=bb(b)+"_edge_"+std::to_string(index);
-   emit("bnez t0, "+tramp);
+   emit("bnez t0, "+(trueHasPhi?tramp:bb(t)));
    go(b,f);
-   label(tramp);go(b,t);return;
+   if(trueHasPhi){label(tramp);go(b,t);}
+   return;
   }
   if(op=="ret"){
    if(rhs!="ret void"){
@@ -182,7 +242,7 @@ struct Generator{
   throw std::runtime_error("unsupported IR opcode: "+op);
  }
  void run(const Func&f){
-  fname=f.name;slots.clear();known.clear();phi.clear();used=0;outgoing=0;
+  fname=f.name;slots.clear();known.clear();phi.clear();promoted.clear();promotedSSA.clear();calleeRegs.clear();lastSSA.clear();used=0;outgoing=0;
   int maxArgs=0,maxPhi=0;
   for(auto &b:f.blocks)for(auto&i:b.ins){
    if(i.opcode=="call"){
@@ -199,15 +259,54 @@ struct Generator{
   auto alloc=[&](const string&name){if(!name.empty()&&!slots.count(name)){slots[name]=used;used+=8;}};
   for(auto&p:f.params)alloc(p);
   for(auto &b:f.blocks)for(auto&i:b.ins)alloc(i.lhs);
+  if(opt){
+   // Keep frequently-used, non-escaping local allocas in callee-saved registers.
+   // Only take addresses that occur in an alloca, load or store. These addresses
+   // are never passed by our ToyC IR generator, so no memory alias can observe them.
+   unordered_map<string,int> freq;unordered_set<string> allocas;
+   for(auto&b:f.blocks)for(auto&i:b.ins)if(i.opcode=="alloca")allocas.insert(i.lhs);
+   for(auto&b:f.blocks)for(auto&i:b.ins){
+    if(i.opcode=="load"||i.opcode=="store"){
+     auto addr=match1(i.raw,R"(ptr\s+(%[\w.]+))");
+     if(allocas.count(addr))++freq[addr];
+    }
+   }
+   // SSA temporaries also use callee-saved registers when profitable.
+   // Unlike a linear-scan allocator, this conservative assignment gives each
+   // selected value its own register for its entire lifetime, so it cannot
+   // introduce overlapping live ranges or clobber values across a call.
+   unordered_set<string> ssaDefs;
+   for(auto&p:f.params)ssaDefs.insert(p);
+   for(auto&b:f.blocks)for(auto&i:b.ins)
+    if(!i.lhs.empty() && i.opcode!="alloca")ssaDefs.insert(i.lhs);
+   static const std::regex nameToken(R"(%[A-Za-z_][A-Za-z0-9_.]*)");
+   for(auto&b:f.blocks)for(auto&i:b.ins){
+    string rhs=i.lhs.empty()?i.raw:i.raw.substr(i.raw.find(" = ")+3);
+    for(std::sregex_iterator it(rhs.begin(),rhs.end(),nameToken),end;it!=end;++it)
+     if(ssaDefs.count(it->str()))freq[it->str()]+=1;
+    if(i.opcode=="phi")freq[i.lhs]+=24;
+   }
+   vector<std::pair<string,int>> ranked(freq.begin(),freq.end());
+   std::sort(ranked.begin(),ranked.end(),[](auto&a,auto&b){if(a.second!=b.second)return a.second>b.second;return a.first<b.first;});
+   const char* names[]={"s1","s2","s3","s4","s5","s6","s7","s8","s9","s10","s11"};
+   for(size_t i=0;i<ranked.size()&&i<11;++i){
+    promoted[ranked[i].first]=names[i];calleeRegs.push_back(names[i]);
+    if(ssaDefs.count(ranked[i].first))promotedSSA.insert(ranked[i].first);
+   }
+  }
   int phiStage=used;used+=maxPhi*8;
   // phi staging must be separate from all regular slots.
   // branches() uses 'used' as staging base; assigned just below.
-  frame=round16(used+16);savedS0=frame-16;savedRA=frame-8;
+  frame=round16(used+16+static_cast<int>(calleeRegs.size())*8);
+  savedS0=frame-16;savedRA=frame-8;
+  savedRegsBase=frame-16-static_cast<int>(calleeRegs.size())*8;
   used=phiStage;
   out<<".text\n.globl "<<fname<<"\n.type "<<fname<<", @function\n";label(fname);
   if(frame<=2047)emit("addi sp, sp, -"+std::to_string(frame));
   else {emit("li t5, -"+std::to_string(frame));emit("add sp, sp, t5");}
   storeRaw("ra",savedRA,true);storeRaw("s0",savedS0,true);
+  for(size_t i=0;i<calleeRegs.size();++i)
+   storeRaw(calleeRegs[i],savedRegsBase+static_cast<int>(i)*8,true);
   emit("mv s0, sp");
   // Incoming a0..a7, extra arguments at old sp + 8*(index-8).
   for(size_t i=0;i<f.params.size();++i){
@@ -215,10 +314,46 @@ struct Generator{
    else {loadRaw("t0",frame+static_cast<int>(i-8)*8,true);put(f.params[i],"t0");}
   }
   for(auto&b:f.blocks){
-   label(bb(b.name));int k=0;
-   for(auto&i:b.ins)inst(i,b.name,k++);
+   lastSSA.clear();label(bb(b.name));
+   // Fuse the common ToyC condition chain directly into an RV64 branch:
+   // icmp i32 -> zext i1 to i32 -> icmp ne 0 -> br i1.
+   for(size_t k=0;k<b.ins.size();++k){
+    if(opt && k+3<b.ins.size() && b.ins[k].opcode=="icmp" &&
+       b.ins[k+1].opcode=="zext" && b.ins[k+2].opcode=="icmp" &&
+       b.ins[k+3].opcode=="br"){
+      const auto&a=b.ins[k],&z=b.ins[k+1],&test=b.ins[k+2],&br=b.ins[k+3];
+      std::smatch cmp,brm;
+      string ir0=a.raw.substr(a.raw.find(" = ")+3);
+      bool ok=std::regex_match(ir0,cmp,std::regex(R"(icmp (eq|ne|slt|sle|sgt|sge) i32 ([^,]+), (\S+))"));
+      ok=ok && z.raw.find("zext i1 "+a.lhs+" to i32")!=string::npos;
+      ok=ok && test.raw.find("icmp ne i32 "+z.lhs+", 0")!=string::npos;
+      ok=ok && std::regex_match(br.raw,brm,std::regex(R"(br i1 (%[\w.]+), label %([\w.]+), label %([\w.]+))"));
+      ok=ok && (brm.empty()||brm[1].str()==test.lhs);
+      if(ok){
+       // Single-use guards protect cases where the condition values are reused.
+       auto uses=[&](const string&needle){
+        int count=0;
+        for(auto&bb2:f.blocks)for(auto&ii:bb2.ins){
+         string rhs=ii.lhs.empty()?ii.raw:ii.raw.substr(ii.raw.find(" = ")+3);
+         static const std::regex token(R"(%[A-Za-z_][A-Za-z0-9_.]*)");
+         for(std::sregex_iterator it(rhs.begin(),rhs.end(),token),end;it!=end;++it)
+          if(it->str()==needle)++count;
+        }
+        return count;
+       };
+       if(uses(a.lhs)==1&&uses(z.lhs)==1&&uses(test.lhs)==1){
+        directBranch(b.name,static_cast<int>(k),cmp[1],trim(cmp[2]),trim(cmp[3]),brm[2],brm[3]);
+        k+=3;continue;
+       }
+      }
+    }
+    inst(b.ins[k],b.name,static_cast<int>(k));
+   }
   }
-  label(epilogue());loadRaw("ra",savedRA,true);loadRaw("s0",savedS0,true);
+  label(epilogue());
+  for(size_t i=0;i<calleeRegs.size();++i)
+   loadRaw(calleeRegs[i],savedRegsBase+static_cast<int>(i)*8,true);
+  loadRaw("ra",savedRA,true);loadRaw("s0",savedS0,true);
   if(frame<=2047)emit("addi sp, sp, "+std::to_string(frame));
   else {emit("li t5, "+std::to_string(frame));emit("add sp, sp, t5");}
   emit("ret");out<<".size "<<fname<<", .-"<<fname<<"\n\n";

@@ -2,7 +2,7 @@ CXX ?= g++
 CXXFLAGS ?= -O2 -std=c++17 -Wall -Wextra -Wpedantic
 .PHONY: all clean test
 all: compiler
-compiler: src/main.cpp src/parser.hpp src/semantic.hpp src/ir.hpp src/native_backend.hpp src/optimizer.hpp
+compiler: src/main.cpp src/parser.hpp src/semantic.hpp src/ir.hpp src/native_backend.hpp src/optimizer.hpp src/ast_opt.hpp src/ast_advanced.hpp src/ssa_promote.hpp src/global_cse.hpp
 	$(CXX) $(CXXFLAGS) $< -o $@
 test: compiler
 	printf 'int main() { return 0; }\n' | ./compiler -ast

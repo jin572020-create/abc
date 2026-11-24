@@ -243,6 +243,8 @@ string normalized(string s) {
 #include "ir.hpp"
 } // namespace
 #include "native_backend.hpp"
+#include "ast_opt.hpp"
+#include "ast_advanced.hpp"
 #include "optimizer.hpp"
 int main(int argc,char** argv){
     std::string mode;
@@ -280,6 +282,7 @@ int main(int argc,char** argv){
             std::cerr<<"semantic analysis failed at line "<<errors.front()<<"\n";return 1;
         }
         try{
+            if(opt){toyc_ast_opt::optimize(ast);toyc_advanced::optimize(ast);toyc_ast_opt::optimize(ast);}
             IREmitter emitter;
             auto ir=emitter.generate(ast);
             if(opt)ir=local_opt::optimize(ir);
