@@ -7,4 +7,4 @@ add_executable(compiler src/main.cpp)
 target_compile_options(compiler PRIVATE -Wall -Wextra -Wpedantic)
 
 # Keep header-only parser, semantics, and IR backend in dependency graph.
-target_sources(compiler PRIVATE src/parser.hpp src/semantic.hpp src/ir.hpp src/llvm_driver.hpp)
+target_sources(compiler PRIVATE src/parser.hpp src/semantic.hpp src/ir.hpp src/native_backend.hpp src/optimizer.hpp)

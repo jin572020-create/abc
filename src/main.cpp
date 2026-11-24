@@ -242,7 +242,8 @@ string normalized(string s) {
 #include "semantic.hpp"
 #include "ir.hpp"
 } // namespace
-#include "llvm_driver.hpp"
+#include "native_backend.hpp"
+#include "optimizer.hpp"
 int main(int argc,char** argv){
     std::string mode;
     bool opt=false;
@@ -281,8 +282,9 @@ int main(int argc,char** argv){
         try{
             IREmitter emitter;
             auto ir=emitter.generate(ast);
+            if(opt)ir=local_opt::optimize(ir);
             if(mode=="-ir"&&!opt){std::cout<<ir;return 0;}
-            std::cout<<compileLLVM(ir,mode=="-asm",opt);
+            std::cout<<(mode=="-asm"?native_toyc::emitAssembly(ir,opt):ir);
             return 0;
         }catch(const std::exception &e){std::cerr<<"ToyC code generation: "<<e.what()<<"\n";return 1;}
     }

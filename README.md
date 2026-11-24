@@ -1,73 +1,56 @@
-# ToyC 编译器：词法、语法、语义、LLVM IR 与 RV64GC 代码生成
+# ToyC 编译器：纯 C++17 自主实现的 LLVM IR 子集与 RV64GC 后端
 
-本包在原 `abc` 仓库上增量覆盖，不必创建新仓库。保留既有 `-token`、`-ast` 与 `-dump-dfa`，新增 `-ir`、`-ir -opt`、`-asm`、`-asm -opt`。源码基于 C++17。
+## 依赖与构建
 
-## 核心实现与工具依赖
+**编译器运行时不依赖 Clang、LLVM、Flex、Bison、系统调用或任何外部编译器。**
 
-| 文件 | 功能 |
-| --- | --- |
-| `src/main.cpp` | ToyC 词法器及统一编译入口，沿用原有接口 |
-| `src/parser.hpp` | 递归下降 Parser，构造 AST |
-| `src/semantic.hpp` | 基础语义检查 |
-| `src/ir.hpp` | AST → LLVM IR，函数/基本块/局部栈槽/表达式/短路条件/循环/调用 |
-| `src/llvm_driver.hpp` | 调用外部 Clang/LLVM 将 IR 优化并降低为 RV64GC 汇编 |
-| `CMakeLists.txt`、`Makefile` | 独立构建脚本 |
+- 构建：C++17 编译器（g++ 9+ 或兼容实现）、Make 或 CMake 3.12+。
+- `make clean && make` 在仓库根目录生成 `./compiler`。
+- `cmake -S . -B build && cmake --build build` 在 `build/compiler` 生成可执行文件。
+- `python3 tests/selftest.py` 运行无需其他外部程序的自检。
+- 若要运行真正 RISC-V 程序，需按照课程要求另行配置 `riscv64-unknown-elf-gcc`、`qemu-riscv64` 与 `third_party/toyc/libtoyc.a`；它们不是编译器本身的运行依赖。
 
-**新增运行依赖：Clang/LLVM，需支持 `riscv64-unknown-elf` 目标。** 这不是纯手写汇编后端：LLVM 负责 `-O2` 优化、RISC-V 指令选择、寄存器分配、spill/reload 和汇编输出。C++ 项目本身可以用 GCC 14 或其他 C++17 编译器构建，但在运行 `-asm`、`-asm -opt`、`-ir -opt` 时必须能够执行 `clang`。仅有 `g++`、`riscv64-unknown-elf-gcc` 不等于已满足运行依赖。若评测平台不预装 Clang，运行会失败，请先确认平台的工具白名单。可通过 `TOYC_CLANG=/path/to/clang` 指定 LLVM 工具链位置。
-
-项目使用手写 NFA→DFA→最小化词法器和手写递归下降 Parser，不使用 Flex、Bison、ANTLR，也没有 .l/.y 生成步骤。LLVM IR 是自定义 AST 发射器输出的正式 LLVM IR 文本，经 Clang 的优化与后端转换。
-
-## 构建
-
-```sh
-# Ubuntu / Linux
-clang --version
-clang -print-targets | grep riscv
-cmake -S . -B build
-cmake --build build
-# 如果需要根目录可执行文件：
-make
-```
-
-`make` 生成 `./compiler`；`cmake` 生成 `./build/compiler`。和原仓库的构建路径保持一致。不要把任何二进制文件上传到 GitHub。
-
-## 运行
+## 用法
 
 ```sh
 ./compiler -token < input.c
 ./compiler -ast < input.c
-./compiler -ir < input.c > input.ll
-./compiler -ir -opt < input.c > input.opt.ll
-./compiler -asm < input.c > input.s
-./compiler -asm -opt < input.c > input.opt.s
+./compiler -ir < input.c > input.ll             # 调试接口
+./compiler -ir -opt < input.c > optimized.ll   # 调试接口
+./compiler -asm < input.c > input.s            # 评测功能接口
+./compiler -asm -opt < input.c > optimized.s   # 评测性能接口
+./compiler -dump-dfa
 ```
 
-`-asm` 使用 LLVM 的 `-O0` 后端路径；`-asm -opt` 使用 `-O2`，包括 LLVM 的 SSA 提升、传播、DCE、CFG 简化、循环优化和后端优化等。不是声称本项目手写了这些 pass。`-ir` 是可选调试入口，并非平台功能测试所需。输出文件只包含 LLVM IR 或汇编；Clang 的诊断进入 stderr。`-ast` 保持 `accept/reject + 0 起始错误行号` 的格式。
+编译器从 stdin 读 ToyC，向 stdout 输出结果；代码生成失败报告到 stderr 并返回非零退出状态。
 
-## LLVM IR 生成约定
+## 架构
 
-1. 函数开始时为形参、局部变量分别在 `entry` 生成 `alloca i32`；形参存入自己的栈槽。局部变量声明在作用域栈中登记，读取 `load`，赋值 `store`。
-2. 表达式使用 i32 算术，关系运算先 `icmp` 再 `zext i1 to i32`；逻辑 `&&` / `||` 使用短路分支，作为值使用时以 `phi i32` 汇合。
-3. `if`、`while`、`break`、`continue`、`return` 使用显式基本块和终结指令；全部块以 `br`、`ret` 或 `unreachable` 结尾。
-4. 调用形参按源代码中的从左到右顺序求值，内置运行时函数按 ABI 签名声明。所有函数签名预先收集，以支持前向调用。
-5. 局部作用域支持遮蔽；语义检查若未通过，编译器停止代码生成。
+- `src/main.cpp`: NFA→DFA→最小化扫描器、CLI、前端串联。
+- `src/parser.hpp`: 递归下降语法分析，构造 AST。
+- `src/semantic.hpp`: 基础语义检查（作用域、参数数量、返回值、循环内 break/continue）。
+- `src/ir.hpp`: **手写** ToyC AST→LLVM IR（文本形式，所用指令是本项目定义的支持子集）。栈上局部变量通过 `alloca/load/store` 表示；if/while、短路求值及 phi 使用基本块表示。
+- `src/optimizer.hpp`: **手写** SSA 常量折叠/传播、简单复制传播、基本块内 CSE、无用纯指令 DCE。优化仅针对项目发出的有限 LLVM IR 指令子集，不是 LLVM 官方优化器。
+- `src/native_backend.hpp`: **手写** LLVM IR 子集解析 + RV64GC 汇编生成。指令选择使用 `addw/subw/mulw/divw/remw` 和控制流跳转；SSA 值以独立栈槽保守分配，处理函数序言/尾声、栈 16 字节对齐、ABI 参数寄存器 `a0..a7`、第九及以后参数、函数调用返回以及 phi 入边并行拷贝。大栈帧和大偏移由扩展指令序列处理。
 
-## 链接运行（需要课程提供的库与 QEMU）
+### 优化边界（必须如实说明）
+
+实现了上述基础 IR 优化，**尚未实现**通用 mem2reg（支配树/支配边界）、跨基本块 CSE/GVN、LICM、内联、强度削减魔数法、图着色/线性扫描寄存器分配、两轮窥孔优化和块重排。本版本使用保守的栈槽分配，侧重正确性和不依赖外部 LLVM；在大型性能用例上可能不符合时间要求。`-opt` 是生效的，但不保证显著加速。
+
+## 一致性和限制
+
+- 仅支持本课程 ToyC 前端生成的 LLVM IR 子集，**不接受任意 LLVM IR**；`-ir` 输出的文本格式遵循该子集对应的 LLVM IR 语法。
+- ToyC 的 `int` 按 32 位有符号整数处理，RV64 输出遵循 LP64D 的 `int` 返回与参数习惯。
+- 外部 `getint`、`putint`、`getch`、`putch` 等运行时函数由课程 `libtoyc.a` 提供，不包含在这个覆盖包中。
+- 不声明所有隐藏测试通过；先前的 `-ast` s05 对旧测试标准存在重复行号差异，具体参见历史记录。
+
+## 真正执行 RV64GC 示例
 
 ```sh
-./compiler -asm < input.c > input.s
 ./compiler -asm -opt < input.c > input.opt.s
-riscv64-unknown-elf-gcc -march=rv64gc -mabi=lp64d \
-  -nostdlib -static input.opt.s third_party/toyc/libtoyc.a -o input
-qemu-riscv64 ./input < input.in > result.out
+riscv64-unknown-elf-gcc -march=rv64gc -mabi=lp64d -nostdlib -static \
+  input.opt.s third_party/toyc/libtoyc.a -o input
+qemu-riscv64 ./input < input.in > input.out
 ```
 
-若工具链未提供 `qemu-riscv64`、`riscv64-unknown-elf-gcc` 或 `third_party/toyc/libtoyc.a`，请按课程指定环境安装或放入对应文件；本压缩包不包含第三方运行时库。
-
-## 测试与已知边界
-
-见 `TEST_RESULTS.md`。已核对 30 个代码生成测试源程序的 IR、`-asm` / `-asm -opt` RV64 目标汇编器语法，以及在主机 LLVM 后端运行的 50 组输入；**尚未在 QEMU + 课程运行库组合下执行 RISC-V 最终程序**。
-
-旧版 25 个语法/语义用例与标准结果比较有 24 个完全一致，剩余 `s05_while_without_condition` 的旧标准要求 `reject,2,2`，本项目当前输出 `reject,2`；平台先前反馈重复行号可能导致错误输出，因此不恢复重复报错。
-
-原词法器的整数规则在源码中为 `[0-9]+`，与早期指导材料的 `0|[1-9][0-9]*` 不同；需按最新修订规则确认。本项目仅涵盖给定的 ToyC 子集，不支持数组声明、全局变量或 C 的全部语法。
+如果评测环境约定 `./compiler` 路径，请使用 `make` 构建并保证根目录可执行文件在该路径。
